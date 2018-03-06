@@ -1,0 +1,273 @@
+
+//  mandelbrot.js:  Mandelbrot set
+//  R. Renka
+//  07/24/2016, 11/9/2016
+//
+//  The Mandelbrot set [Scientific American, August, 1985] is a
+//  connected region of the complex plane whose boundary is a fractal 
+//  curve:  the set of complex numbers c for which the following 
+//  sequence is bounded:
+//
+//       z(0) = 0,  z(k) = z(k-1)*z(k-1) + c for k > 0.
+//
+//  The sequence is bounded iff |z(k)| < 2 for all k.
+//
+//  A more complete characterization of the Mandelbrot set M is as 
+//  follows.  For fixed c, the set of initial values z(0) for which z(k) 
+//  increases without bound is the basin of attraction Ac of infinity, 
+//  its boundary is the Julia set Jc, and its complement Kc is the filled 
+//  Julia set associated with c.  Each such Kc is either connected or
+//  has a one-to-one correspondence with the classical Cantor set.  M is 
+//  the set of c for which Kc is connected or, equivalently, the set of c 
+//  for which Kc contains 0 (or contains c).  M thus represents an infinite 
+//  number of Julia sets (magnification of M in the vicinity of c appears 
+//  similar to Kc) and is therefore not self-similar.
+//
+//  The normalized device coordinate space [-1,1] X [-1,1] is partitioned 
+//  into a pair of triangles using the four corners as the vertices.
+//
+//  The viewport is mapped to a user-selected square region R in the 
+//  complex plane.  The fragment shader uses this mapping to compute c, 
+//  and then iterates on z(k) = z(k-1)*z(k-1) + c until either |z(k)| >= 2
+//  or k = kmax.  The pixel is assigned a color that depends on the final
+//  value of |z(k)|.  Ideally, kmax should be inversely proportional to
+//  the area represented by a pixel, and colors at points outside of M 
+//  should be based on the discrete escape time (final k value), but neither 
+//  of those features is possible for the fragment shader implementation 
+//  used in this program.  The problem is that loop sizes must be fixed
+//  at compile time and no information is returned by the shader.  The
+//  advantage, however, is an efficient method that uses as many fragment
+//  processors as are available concurrently.  There are no loops over
+//  pixels.
+//
+//  The functions other than main are alphabetically ordered.
+
+"use strict";
+
+//  Rendering context gl is set by main and used by draw.
+
+var gl = 0;
+
+//  Global variables defining user controllable options:
+
+var opt = {
+    cx: -0.5, cy: 0.0,    // Center coordinates
+    size: 3.5             // Width and height of R
+    };
+
+
+/******************************************************************************/
+function main() {
+
+//  This function is invoked by the onLoad event of the web page.
+ 
+//  Retrieve <canvas> element.
+
+    var canvas = document.getElementById("webgl");
+
+//  Get the rendering context for WebGL.
+
+    gl = getWebGLContext(canvas);
+    if (!gl) {
+        console.log("Failed to get the rendering context for WebGL");
+        return;
+    }
+
+//  Get the shader script tags.
+
+    var vShaderScript = document.getElementById("shader-vs");
+    var fShaderScript = document.getElementById("shader-fs");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+        return;
+    }
+
+//  Initialize shaders and create a program object.
+
+    if (!initShaders(gl, vShaderScript.text, fShaderScript.text)) {
+        console.log("Failed to intialize shaders.");
+        return;
+    }
+
+//  Store vertices defining the clip coordinate space [-1,1] X [-1,1].
+
+    var vertices = new Float32Array ([
+        -1.0, -1.0,  1.0, -1.0,  1.0, 1.0,  -1.0, 1.0 ]);
+
+//  Create a buffer object, bind it to the target, and copy the data.
+
+    var VBO = gl.createBuffer();
+    if (!VBO) {
+        console.log("Failed to create a buffer object");
+        return;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, VBO);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+//  Retrieve storage locations of attributes and uniform variables.
+
+    if (!getLocations(gl)) { return; }
+
+//  Assign the buffer object and enable the assignment.
+
+    var prg = gl.program;
+    gl.vertexAttribPointer(prg.a_Position, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(prg.a_Position);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+ 
+//  Set the background color to black.
+
+    gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+//  Register event handlers for keypresses and mouse events.
+
+    document.onkeydown = function(ev){ keydown(gl, ev); };
+    canvas.onmousedown = function(event) {
+        var x = event.clientX, y = event.clientY;
+        var rect = event.target.getBoundingClientRect();
+        if (rect.left <= x  &&  x <= rect.right  &&
+            rect.top <= y  &&  y <= rect.bottom) {
+            opt.cx += opt.size*((x - rect.left) - canvas.width/2)/canvas.width;
+            opt.cy += opt.size*(canvas.height/2 - (y-rect.top))/canvas.height;
+            draw();
+        }
+    };
+
+//  create the image.
+
+    draw();
+}
+
+
+/******************************************************************************/
+function draw() {
+
+    var prg = gl.program;
+
+//  Resize the canvas if necessary, and clear the color buffers.
+
+    resize(gl);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+//  Set the uniform variables.
+
+    gl.uniform1f(prg.cx, opt.cx);
+    gl.uniform1f(prg.cy, opt.cy);
+    gl.uniform1f(prg.size, opt.size);
+    gl.uniform1f(prg.nx, gl.canvas.width);
+    gl.uniform1f(prg.ny, gl.canvas.height);
+
+//  Draw the image.
+
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+}
+
+
+/******************************************************************************/
+function getLocations(gl) {
+
+//  This function retrieves the storage locations of the attribute variable
+//  a_Position in the vertex shader and the uniform variables in the fragment 
+//  shader.
+
+    var prg = gl.program;
+    prg.a_Position = gl.getAttribLocation(prg, 'a_Position');
+    prg.cx = gl.getUniformLocation(prg, 'cx');
+    prg.cy = gl.getUniformLocation(prg, 'cy');
+    prg.size = gl.getUniformLocation(prg, 'size');
+    prg.nx = gl.getUniformLocation(prg, 'nx');
+    prg.ny = gl.getUniformLocation(prg, 'ny');
+
+    if (prg.a_Position < 0 || !prg.cx || !prg.cy || !prg.size || 
+        !prg.nx || !prg.ny) {
+        console.log('Failed to get the storage location of attribute ' +
+                    'or uniform variable');
+        return false;
+    }
+
+    return true;
+}
+
+
+/******************************************************************************/
+function keydown(gl, event) {
+
+    if (event.keyCode !== undefined) {
+        code = event.keyCode;
+    } else if (event.key !== undefined) {
+        code = event.key;
+    }
+
+    switch(code) {
+        case 82:                  // r:  Restore defaults
+            setDefaults();
+            break;
+
+        case 188:                 // <:  Zoom out
+            zoomOut();
+            break;
+
+        case 190:                 // >:  Zoom in
+            zoomIn();
+            break;
+
+        default:
+            return;
+    }
+}
+
+
+/******************************************************************************/
+function resize(gl) {
+
+// Get the canvas from the WebGL context.
+
+    var canvas = gl.canvas;
+ 
+// Lookup the size the browser is displaying the canvas.
+
+    var displayWidth  = canvas.clientWidth;
+    var displayHeight = canvas.clientHeight;
+ 
+// Check if the canvas is not the same size.
+
+    if (canvas.width  != displayWidth ||
+        canvas.height != displayHeight) {
+ 
+// Make the canvas the same size.
+
+        canvas.width  = displayWidth;
+        canvas.height = displayHeight;
+ 
+// Set the viewport to match.
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+}
+
+
+/******************************************************************************/
+function setDefaults() {
+
+//  Set default values for options.
+
+    opt.cx = -0.5;
+    opt.cy = 0.0;
+    opt.size = 3.5;
+    draw();
+}
+
+
+/******************************************************************************/
+function zoomIn() {
+    opt.size = 0.8*opt.size;
+    draw();
+}
+
+
+/******************************************************************************/
+function zoomOut() {
+    opt.size = 1.25*opt.size;
+    draw();
+}
+

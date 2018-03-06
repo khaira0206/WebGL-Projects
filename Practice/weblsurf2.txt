@@ -1,0 +1,1104 @@
+
+//  wglsurf2.js:  Surface renderer
+//  R. Renka
+//  07/17/2016
+//
+//  This program reads a json file containing a triangle mesh surface
+//  (model) in the form of a vertex list and triangle list, and displays 
+//  the surface with a user-specified shading method:  flat, Gouraud,
+//  Phong, or wireframe.
+
+"use strict";
+
+//  Global variables
+
+//  Buffer objects created by handleLoadedModel and used by draw:
+
+var buffers = {};
+var modelLoaded = false;     // True iff the model has been loaded
+
+//  Camera, light, and model orientations (angle/axis pairs):
+
+var orient_camera = new Orientation(0.0, [1.0, 0.0, 0.0]);
+var orient_light = new Orientation(0.0, [1.0, 0.0, 0.0]);
+var orient_model = new Orientation(0.0, [1.0, 0.0, 0.0]);
+
+//  Phong's illumination model:
+
+var imodel = { 
+    frontColor:  [0.5, 0.0, 0.0, 1.0],
+    backColor:  [0.0, 0.0, 0.5, 1.0],
+    ambientLight:  [0.4, 0.4, 0.4],
+    lightColor:  [1.0, 1.0, 1.0],
+    shininess:  32
+    };
+ 
+//  Miscellaneous options:
+
+var opt = {
+    perspective: true,       // Perspective vs orthographic projection
+    vsf: 1.0                 // Scale factor for zoom
+    };
+
+
+/******************************************************************************/
+function main() {
+
+//  This function is invoked by the onLoad event of the web page.
+ 
+//  Retrieve <canvas> element.
+
+    var canvas = document.getElementById("webgl");
+
+//  Get the rendering context for WebGL.
+
+    var gl = getWebGLContext(canvas);
+    if (!gl) {
+        console.log("Failed to get the rendering context for WebGL");
+        return;
+    }
+
+//  Use lib/cuon-utils.js functions to initialize shaders and create
+//  program objects.
+
+    if (!makePrograms(gl)) {
+        console.log("Failed to intialize shaders.");
+        return;
+    }
+
+//  Retrieve storage locations of attributes and uniform variables.
+
+    if (!getLocations(gl)) { return; }
+ 
+//  Set the background color, and enable depth testing.
+
+    gl.clearColor(0.0, 0.0, 0.0, 1.0);
+    gl.enable(gl.DEPTH_TEST);
+
+//  Prompt for a file name.
+
+    var fname = prompt("Specify a path to a json file.", 
+                       'models/cube.json');
+ 
+//  Load a model from the web server using AJAX + JSON.
+//  This function registers a callback and returns immediately.
+//  The callback (handleLoadedModel), if successful, will initiate drawing.
+
+    loadModel(gl, fname);
+
+//  Register event handlers for keypresses and mouse events.
+
+    document.onkeydown = function(ev){ keydown(gl, ev); };
+    initMouseEvents(gl, canvas);
+}
+
+
+/******************************************************************************/
+function computeBB(vertices, bbox) {
+
+//  Compute axis-aligned bounding box parameters [xmin,xmax] X [ymin,ymax], 
+//  radius r, and center c = (xc,yc,zc).
+
+    var dx, dy, dz, r, x, xc, xmax, xmin, y, yc, ymax, ymin, z, zc, zmax, zmin;
+
+    xmin = vertices[0];
+    xmax = xmin;
+    ymin = vertices[1];
+    ymax = ymin;
+    zmin = vertices[2];
+    zmax = zmin;
+
+    for (var i = 1; i < vertices.length; i++) {
+        x = vertices[3*i];
+        y = vertices[3*i+1];
+        z = vertices[3*i+2];
+        if (x < xmin) xmin = x;
+        if (x > xmax) xmax = x;
+        if (y < ymin) ymin = y;
+        if (y > ymax) ymax = y;
+        if (z < zmin) zmin = z;
+        if (z > zmax) zmax = z;
+    }
+
+    xc = (xmin+xmax)/2.0;
+    yc = (ymin+ymax)/2.0;
+    zc = (zmin+zmax)/2.0;
+
+    dx = xmax - xmin;
+    dy = ymax - ymin;
+    dz = zmax - zmin;
+    r = Math.sqrt(dx*dx + dy*dy + dz*dz)/2.0;
+
+//  Store bbox properties.
+
+    bbox.xmin = xmin;
+    bbox.xmax = xmax;
+    bbox.ymin = ymin;
+    bbox.ymax = ymax;
+    bbox.xc = xc;
+    bbox.yc = yc;
+    bbox.zc = zc;
+    bbox.r = r;
+}
+
+
+/******************************************************************************/
+function constructNormals(vertices, indices) {
+     
+    var vnormals = new Float32Array(vertices.length);
+    var a, b, i1, i2, i3, tn, vn, x1, x2, x3, y1, y2, y3, z1, z2, z3;
+
+    for (var i = 0; i < indices.length/3; i++) {
+        i1 = indices[3*i];
+        i2 = indices[3*i+1];
+        i3 = indices[3*i+2];
+
+        x1 = vertices[3*i1];
+        y1 = vertices[3*i1+1];
+        z1 = vertices[3*i1+2];
+
+        x2 = vertices[3*i2];
+        y2 = vertices[3*i2+1];
+        z2 = vertices[3*i2+2];
+
+        x3 = vertices[3*i3];
+        y3 = vertices[3*i3+1];
+        z3 = vertices[3*i3+2];
+
+        a = [x2 - x1, y2 - y1, z2 - z1];
+        b = [x3 - x1, y3 - y1, z3 - z1];
+        tn = [a[1] * b[2] - a[2] * b[1],
+              a[2] * b[0] - a[0] * b[2],
+              a[0] * b[1] - a[1] * b[0] ];
+
+//  Normalize tn to a unit vector.
+
+        vn = Math.sqrt(tn[0] * tn[0] + tn[1] * tn[1] + tn[2] * tn[2]);
+        if (vn) {
+            tn[0] /= vn;
+            tn[1] /= vn;
+            tn[2] /= vn;
+        }
+
+//  Add the triangle normal tn to the three vertices.
+
+        vnormals[3*i1] += tn[0];
+        vnormals[3*i1+1] += tn[1];
+        vnormals[3*i1+2] += tn[2];
+
+        vnormals[3*i2] += tn[0];
+        vnormals[3*i2+1] += tn[1];
+        vnormals[3*i2+2] += tn[2];
+
+        vnormals[3*i3] += tn[0];
+        vnormals[3*i3+1] += tn[1];
+        vnormals[3*i3+2] += tn[2];
+    }
+
+//  Normalize the vertex normals.
+
+    for (i = 0; i < vnormals.length/3; i++) {
+        x1 = vnormals[3*i];
+        y1 = vnormals[3*i+1];
+        z1 = vnormals[3*i+2];
+        vn = Math.sqrt(x1 * x1 + y1 * y1 + z1 * z1);
+        if (vn) {
+            vnormals[3*i] /= vn;
+            vnormals[3*i+1] /= vn;
+            vnormals[3*i+2] /= vn;
+        }        
+    }
+
+    return vnormals;
+}
+
+
+/******************************************************************************/
+function createArrayBuffer(gl, data, num, type) {
+
+//  Create a buffer object, bind it to the target, and copy data.
+
+    var buffer =  gl.createBuffer();
+    if (!buffer) {
+        console.log('Failed to create the buffer object');
+        return null;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+//  Store information required by the attribute variable.
+
+    buffer.num = num;
+    buffer.type = type;
+
+    return buffer;
+}
+
+
+/******************************************************************************/
+function draw(gl) {
+
+    if (!modelLoaded) {
+        console.log('Failed to load model');
+        return;
+    }
+
+//  Resize the canvas if necessary, and clear the buffers.
+
+    resize(gl);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+//  Get the shading method (program) from the radio button.
+
+    var prg = 0;
+    if (document.getElementById("phong").checked) {
+        prg = gl.prgP;
+    } else if (document.getElementById("gouraud").checked) {
+        prg = gl.prgG;
+    } else if (document.getElementById("flat").checked) {
+        prg = gl.prgF;
+    } else {
+        prg = gl.prgW;
+    }
+    gl.useProgram(prg);
+
+//  Construct the projection matrix, and set the value of u_Perspective.
+
+    var projMatrix = new Matrix4();
+    var r = gl.bbox.r;
+    var vsf = opt.vsf;
+    if (opt.perspective) {
+        projMatrix.setFrustum(-vsf*r, vsf*r, -vsf*r, vsf*r, 2.0*r, 4.0*r);
+    } else {
+        projMatrix.setOrtho(-vsf*r, vsf*r, -vsf*r, vsf*r, 2.0*r, 4.0*r);
+    }
+    gl.uniform1f(prg.u_Perspective, opt.perspective);
+
+//  Construct the modelview matrix, and set the value of the uniform variable.
+
+    var mvMatrix = new Matrix4();
+    mvMatrix.setRotate(orient_camera.angle, orient_camera.axis[0], 
+                    orient_camera.axis[1], orient_camera.axis[2]);
+    mvMatrix.translate(0.0, 0.0, -3.0*r);
+    mvMatrix.rotate(orient_model.angle, orient_model.axis[0], 
+                    orient_model.axis[1], orient_model.axis[2]);
+    mvMatrix.translate(-gl.bbox.xc, -gl.bbox.yc, -gl.bbox.zc);
+    gl.uniformMatrix4fv(prg.u_MvMatrix, false, mvMatrix.elements);
+        
+//  Construct the modelview-projection matrix and pass it to u_MvpMatrix.
+
+    var mvpMatrix = new Matrix4();
+    mvpMatrix.set(projMatrix);
+    mvpMatrix.multiply(mvMatrix);
+    gl.uniformMatrix4fv(prg.u_MvpMatrix, false, mvpMatrix.elements);
+
+//  Construct the inverse transpose of mvMatrix, and set the uniform variable.
+
+    var normalMatrix = new Matrix4();
+    normalMatrix.setInverseOf(mvMatrix);
+    normalMatrix.transpose();
+    gl.uniformMatrix4fv(prg.u_NormalMatrix, false, normalMatrix.elements);
+
+//  Set the uniform variables defining the illumination model.
+
+    gl.uniform4f(prg.u_FrontColor, imodel.frontColor[0], imodel.frontColor[1],
+        imodel.frontColor[2], imodel.frontColor[3]);
+    gl.uniform4f(prg.u_BackColor, imodel.backColor[0], imodel.backColor[1],
+        imodel.backColor[2], imodel.backColor[3]);
+
+    if (prg !== gl.prgW) {
+
+//  Set the light direction (surface to point source in eye coordinates)
+//  to [0, 0, 1] rotated by orient_Light.
+
+        var v = new Float32Array([0.0, 0.0, 1.0]);
+        v = new Vector3(v);
+        var lightMatrix = new Matrix4();
+        lightMatrix.setRotate(orient_light.angle, orient_light.axis[0], 
+                          orient_light.axis[1], orient_light.axis[2]);
+        v = lightMatrix.multiplyVector3(v);
+        gl.uniform3f(prg.u_LightDirection, v.elements[0], v.elements[1],
+                     v.elements[2]);
+
+        gl.uniform3f(prg.u_AmbientLight, imodel.ambientLight[0], 
+            imodel.ambientLight[1], imodel.ambientLight[2]);
+        gl.uniform3f(prg.u_LightColor, imodel.lightColor[0], 
+                     imodel.lightColor[1], imodel.lightColor[2]);
+        gl.uniform1f(prg.u_Shininess, imodel.shininess);
+    }
+
+//  Assign the buffer objects and enable the assignments.
+
+    initAttributeVariable(gl, prg.a_Position, buffers.vertexBuffer);
+    if (prg === gl.prgG  ||  prg === gl.prgP) {
+        initAttributeVariable(gl, prg.a_Normal, buffers.vnormalBuffer);
+    } else {
+        initAttributeVariable(gl, prg.a_Normal, buffers.tnormalBuffer);
+    }
+    if (prg === gl.prgW) {
+        initAttributeVariable(gl, prg.a_BaryCoords, buffers.bcoordsBuffer);
+    }
+
+//  Render the model.
+
+    gl.drawArrays(gl.TRIANGLES, 0, buffers.nvert);
+}
+
+
+/******************************************************************************/
+function expandArrays(vertices, indices, vnormals, modelObj) {
+
+//  Reorder and expand the model vertex array to include three vertices per
+//  triangle by replicating shared vertex positions.  Each vertex consists
+//  of an ordered triple of contiguously stored components, and each triangle
+//  is an ordered sequence of three vertices with contiguously stored indices.
+//  On return the three vertices of each triangle are stored contiguously in
+//  modelObj.vertices and indices is no longer needed.  Also, the vertex
+//  normal vectors are replicated and returned in modelObj.vnormals, and the 
+//  barycentric coordinates of the vertices are returned in modelObj.bcoords.
+
+    var i1, i2, i3;
+    var nt3 = indices.length;
+    var verticesE = new Float32Array(3*nt3);
+    var vnormalsE = new Float32Array(3*nt3);
+    var bcoords = new Float32Array(3*nt3);
+    var indi = 0;
+    var indv = 0;
+    for (var i = 0; i < nt3/3; i++) {
+        i1 = indices[3*i];
+        i2 = indices[3*i + 1];
+        i3 = indices[3*i + 2];
+        verticesE[indv] =     vertices[3*i1];
+        verticesE[indv + 1] = vertices[3*i1 + 1];
+        verticesE[indv + 2] = vertices[3*i1 + 2];
+        verticesE[indv + 3] = vertices[3*i2];
+	verticesE[indv + 4] = vertices[3*i2 + 1];
+        verticesE[indv + 5] = vertices[3*i2 + 2];
+        verticesE[indv + 6] = vertices[3*i3];
+        verticesE[indv + 7] = vertices[3*i3 + 1];
+        verticesE[indv + 8] = vertices[3*i3 + 2];
+
+        vnormalsE[indv] =     vnormals[3*i1];
+        vnormalsE[indv + 1] = vnormals[3*i1 + 1];
+        vnormalsE[indv + 2] = vnormals[3*i1 + 2];
+        vnormalsE[indv + 3] = vnormals[3*i2];
+	vnormalsE[indv + 4] = vnormals[3*i2 + 1];
+        vnormalsE[indv + 5] = vnormals[3*i2 + 2];
+        vnormalsE[indv + 6] = vnormals[3*i3];
+        vnormalsE[indv + 7] = vnormals[3*i3 + 1];
+        vnormalsE[indv + 8] = vnormals[3*i3 + 2];
+
+        bcoords[indv] = 1.0;
+        bcoords[indv + 1] = 0.0;
+        bcoords[indv + 2] = 0.0;
+        bcoords[indv + 3] = 0.0;
+        bcoords[indv + 4] = 1.0;
+        bcoords[indv + 5] = 0.0;
+        bcoords[indv + 6] = 0.0;
+        bcoords[indv + 7] = 0.0;
+        bcoords[indv + 8] = 1.0;
+
+        indv += 9;
+        indi += 3;
+    }
+    modelObj.vertices = verticesE;
+    modelObj.vnormals = vnormalsE;
+    modelObj.bcoords = bcoords;
+}
+
+
+/******************************************************************************/
+function getLocations(gl) {
+
+//  This function retrieves the storage locations of vertex attributes and 
+//  uniform variables in the shaders associated with the programs.
+
+    var prg = gl.prgF;
+    prg.a_Position = gl.getAttribLocation(prg, 'a_Position');
+    prg.a_Normal = gl.getAttribLocation(prg, 'a_Normal');
+    prg.u_AmbientLight = gl.getUniformLocation(prg, 'u_AmbientLight');
+    prg.u_BackColor = gl.getUniformLocation(prg, 'u_BackColor');
+    prg.u_FrontColor = gl.getUniformLocation(prg, 'u_FrontColor');
+    prg.u_LightColor = gl.getUniformLocation(prg, 'u_LightColor');
+    prg.u_LightDirection = gl.getUniformLocation(prg, 'u_LightDirection');
+    prg.u_MvMatrix = gl.getUniformLocation(prg, 'u_MvMatrix');
+    prg.u_MvpMatrix = gl.getUniformLocation(prg, 'u_MvpMatrix');
+    prg.u_NormalMatrix = gl.getUniformLocation(prg, 'u_NormalMatrix');
+    prg.u_Perspective = gl.getUniformLocation(prg, 'u_Perspective');
+    prg.u_Shininess = gl.getUniformLocation(prg, 'u_Shininess');
+
+    if (prg.a_Position < 0 || prg.a_Normal < 0 ||
+        !prg.u_AmbientLight || !prg.u_BackColor || !prg.u_FrontColor || 
+        !prg.u_LightColor || !prg.u_LightDirection || !prg.u_MvMatrix || 
+        !prg.u_MvpMatrix || !prg.u_NormalMatrix || !prg.u_Perspective ||
+        !prg.u_Shininess) {
+        console.log('Failed to get the storage location of attribute ' +
+                    'or uniform variable');
+        return false;
+    }
+
+    prg = gl.prgG;
+    prg.a_Position = gl.getAttribLocation(prg, 'a_Position');
+    prg.a_Normal = gl.getAttribLocation(prg, 'a_Normal');
+    prg.u_AmbientLight = gl.getUniformLocation(prg, 'u_AmbientLight');
+    prg.u_BackColor = gl.getUniformLocation(prg, 'u_BackColor');
+    prg.u_FrontColor = gl.getUniformLocation(prg, 'u_FrontColor');
+    prg.u_LightColor = gl.getUniformLocation(prg, 'u_LightColor');
+    prg.u_LightDirection = gl.getUniformLocation(prg, 'u_LightDirection');
+    prg.u_MvMatrix = gl.getUniformLocation(prg, 'u_MvMatrix');
+    prg.u_MvpMatrix = gl.getUniformLocation(prg, 'u_MvpMatrix');
+    prg.u_NormalMatrix = gl.getUniformLocation(prg, 'u_NormalMatrix');
+    prg.u_Perspective = gl.getUniformLocation(prg, 'u_Perspective');
+    prg.u_Shininess = gl.getUniformLocation(prg, 'u_Shininess');
+
+    if (prg.a_Position < 0 || prg.a_Normal < 0 ||
+        !prg.u_AmbientLight || !prg.u_BackColor || !prg.u_FrontColor || 
+        !prg.u_LightColor || !prg.u_LightDirection || !prg.u_MvMatrix || 
+        !prg.u_MvpMatrix || !prg.u_NormalMatrix || !prg.u_Perspective ||
+        !prg.u_Shininess) {
+        console.log('Failed to get the storage location of attribute ' +
+                    'or uniform variable');
+        return false;
+    }
+
+    prg = gl.prgP;
+    prg.a_Position = gl.getAttribLocation(prg, 'a_Position');
+    prg.a_Normal = gl.getAttribLocation(prg, 'a_Normal');
+    prg.u_AmbientLight = gl.getUniformLocation(prg, 'u_AmbientLight');
+    prg.u_BackColor = gl.getUniformLocation(prg, 'u_BackColor');
+    prg.u_FrontColor = gl.getUniformLocation(prg, 'u_FrontColor');
+    prg.u_LightColor = gl.getUniformLocation(prg, 'u_LightColor');
+    prg.u_LightDirection = gl.getUniformLocation(prg, 'u_LightDirection');
+    prg.u_MvMatrix = gl.getUniformLocation(prg, 'u_MvMatrix');
+    prg.u_MvpMatrix = gl.getUniformLocation(prg, 'u_MvpMatrix');
+    prg.u_NormalMatrix = gl.getUniformLocation(prg, 'u_NormalMatrix');
+    prg.u_Perspective = gl.getUniformLocation(prg, 'u_Perspective');
+    prg.u_Shininess = gl.getUniformLocation(prg, 'u_Shininess');
+
+    if (prg.a_Position < 0 || prg.a_Normal < 0 ||
+        !prg.u_AmbientLight || !prg.u_BackColor || !prg.u_FrontColor || 
+        !prg.u_LightColor || !prg.u_LightDirection || !prg.u_MvMatrix || 
+        !prg.u_MvpMatrix || !prg.u_NormalMatrix || !prg.u_Perspective ||
+        !prg.u_Shininess) {
+        console.log('Failed to get the storage location of attribute ' +
+                    'or uniform variable');
+        return false;
+    }
+
+    prg = gl.prgW;
+    prg.a_Position = gl.getAttribLocation(prg, 'a_Position');
+    prg.a_Normal = gl.getAttribLocation(prg, 'a_Normal');
+    prg.a_BaryCoords = gl.getAttribLocation(prg, 'a_BaryCoords');
+    prg.u_BackColor = gl.getUniformLocation(prg, 'u_BackColor');
+    prg.u_FrontColor = gl.getUniformLocation(prg, 'u_FrontColor');
+    prg.u_MvMatrix = gl.getUniformLocation(prg, 'u_MvMatrix');
+    prg.u_MvpMatrix = gl.getUniformLocation(prg, 'u_MvpMatrix');
+    prg.u_NormalMatrix = gl.getUniformLocation(prg, 'u_NormalMatrix');
+    prg.u_Perspective = gl.getUniformLocation(prg, 'u_Perspective');
+
+    if (prg.a_Position < 0 || prg.a_Normal < 0 || prg.a_BaryCoords < 0 ||
+        !prg.u_BackColor || !prg.u_FrontColor || !prg.u_MvMatrix || 
+        !prg.u_MvpMatrix || !prg.u_NormalMatrix || !prg.u_Perspective) {
+        console.log('Failed to get the storage location of attribute ' +
+                    'or uniform variable');
+        return false;
+    }
+
+    return true;
+}
+
+
+/******************************************************************************/
+function handleLoadedModel(gl, filename, payload) {
+    
+//  Create the typed arrays and buffers associated with model geometry:
+//  vertices, vertex normals, and triangle indices.
+
+    alert(filename + ' has been retrieved from the server');
+    modelLoaded = true;
+
+    var vertices = new Float32Array(payload.vertices);
+    var indices = new Uint32Array(payload.indices);
+    var vnormals = constructNormals(vertices, indices);
+
+//  Create bounding box object bbox.
+
+    gl.bbox = {};
+    computeBB(vertices, gl.bbox);
+
+//  Reorder the vertex array and expand it by replicating vertices if 
+//  necessary so that it contains three distinct vertices for each triangle,
+//  and they are stored contiguously for use by gl.drawArrays.  This is
+//  necessary for flat shading which needs triangle normals and for a 
+//  wireframe mesh which needs barycentric coordinates.  It also avoids
+//  the problem of treating large models in the context of webgl which
+//  limits vertex indices to 16 bits.
+
+    var modelObj = {};
+    expandArrays(vertices, indices, vnormals, modelObj);
+    vertices = modelObj.vertices;
+    vnormals = modelObj.vnormals;
+    var bcoords = modelObj.bcoords;
+
+//  Compute an array tnormals of vertex normal vectors that coincide with
+//  the triangle normal vectors.  This is required for flat shading.
+
+    var tnormals = new Float32Array(vnormals.length);
+    var a, b, tn, vn, x1, x2, x3, y1, y2, y3, z1, z2, z3;
+
+    for (var i = 0; i < tnormals.length; i += 9) {
+        x1 = vertices[i];
+        y1 = vertices[i + 1];
+        z1 = vertices[i + 2];
+        x2 = vertices[i + 3];
+        y2 = vertices[i + 4];
+        z2 = vertices[i + 5];
+        x3 = vertices[i + 6];
+        y3 = vertices[i + 7];
+        z3 = vertices[i + 8];
+
+        a = [x2 - x1, y2 - y1, z2 - z1];
+        b = [x3 - x1, y3 - y1, z3 - z1];
+        tn = [a[1] * b[2] - a[2] * b[1],
+              a[2] * b[0] - a[0] * b[2],
+              a[0] * b[1] - a[1] * b[0] ];
+
+//  Normalize tn to a unit vector.
+
+        vn = Math.sqrt(tn[0] * tn[0] + tn[1] * tn[1] + tn[2] * tn[2]);
+        if (vn) {
+            tn[0] /= vn;
+            tn[1] /= vn;
+            tn[2] /= vn;
+        }
+
+//  Store the triangle normal as the three vertex normals.
+
+        tnormals[i] = tn[0];
+        tnormals[i + 1] = tn[1];
+        tnormals[i + 2] = tn[2];
+        tnormals[i + 3] = tn[0];
+        tnormals[i + 4] = tn[1];
+        tnormals[i + 5] = tn[2];
+        tnormals[i + 6] = tn[0];
+        tnormals[i + 7] = tn[1];
+        tnormals[i + 8] = tn[2];
+    }
+
+//  Create the buffer objects and copy the data
+
+    buffers.vertexBuffer = createArrayBuffer(gl, vertices, 3, gl.FLOAT);
+    if (!buffers.vertexBuffer) {
+        console.log('Failed to create vertex buffer');
+        return; 
+    }
+
+    buffers.vnormalBuffer = createArrayBuffer(gl, vnormals, 3, gl.FLOAT);
+    if (!buffers.vnormalBuffer) {
+        console.log('Failed to create vertex normal buffer');
+        return; 
+    }
+
+    buffers.tnormalBuffer = createArrayBuffer(gl, tnormals, 3, gl.FLOAT);
+    if (!buffers.tnormalBuffer) {
+        console.log('Failed to create triangle normal buffer');
+        return; 
+    }
+
+    buffers.bcoordsBuffer = createArrayBuffer(gl, bcoords, 3, gl.FLOAT);
+    if (!buffers.bcoordsBuffer) {
+        console.log('Failed to create barycentric coordinates buffer');
+        return; 
+    }
+
+//  Store number of vertices for use by draw in gl.drawArrays.
+
+    buffers.nvert = vertices.length/3;
+   
+//  Unbind the buffers from the targets
+
+    gl.bindBuffer(gl.ARRAY_BUFFER,null);
+
+//  Call draw.
+    
+    draw(gl);
+} 
+
+
+/******************************************************************************/
+function initAttributeVariable(gl, a_Attribute, buffer) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);    
+    gl.vertexAttribPointer(a_Attribute, buffer.num, buffer.type, false, 0, 0);
+    gl.enableVertexAttribArray(a_Attribute);
+}
+
+
+/******************************************************************************/
+function initMouseEvents(gl, canvas) {
+
+//  Register event handlers for mouse button press, mouse motion, and
+//  mouse button release.
+
+//  dragging = true iff a mouse button has been pressed with the mouse
+//  position in the canvas.
+//
+//  (xs,ys) = starting mouse position in a drag operation.
+
+    var dragging = false;
+    var xs = -1, ys = -1;
+ 
+    canvas.onmousedown = function(event) {
+        var x = event.clientX, y = event.clientY;
+        var rect = event.target.getBoundingClientRect();
+        if (rect.left <= x  &&  x <= rect.right  &&
+            rect.top <= y  &&  y <= rect.bottom) {
+            xs = x;
+            ys = y;
+            dragging = true;
+        }
+    };
+
+    canvas.onmouseup = function(event) { dragging = false; };
+
+    canvas.onmousemove = function(event) {
+        var ad2, cd, sd;
+        var q = [], r = [];
+        var x = event.clientX, y = event.clientY;
+        if (dragging) {
+
+//  Rotations are one degree per pixel.
+
+            var sf = Math.PI / 180.0;
+            var dx = sf * (x - xs);
+            var dy = sf * (y - ys);
+            if (Math.abs(dx) <= Math.abs(dy)) {
+
+//  Rotate the model about the x axis by dy degrees.
+
+                ad2 = dy / 2.0;
+                cd = Math.cos(ad2);
+                sd = Math.sin(ad2);
+                q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle dy and axis [1, 0, 0].
+
+                r[0] = cd*q[0] - sd*q[1];
+                r[1] = cd*q[1] + sd*q[0];
+                r[2] = cd*q[2] - sd*q[3];
+                r[3] = cd*q[3] + sd*q[2];
+                orient_model.fromQuaternion(r);
+            } else {
+
+//  Rotate the model about the y axis by dx degrees.
+
+                ad2 = dx / 2.0;
+                cd = Math.cos(ad2);
+                sd = Math.sin(ad2);
+                q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle dx and axis [0, 1, 0].
+
+                r[0] = cd*q[0] - sd*q[2];
+                r[1] = cd*q[1] + sd*q[3];
+                r[2] = cd*q[2] + sd*q[0];
+                r[3] = cd*q[3] - sd*q[1];
+                orient_model.fromQuaternion(r);
+            }
+
+//  Draw the image.
+
+            draw(gl);
+        }
+        xs = x;
+        ys = y;
+    };
+}
+
+
+/******************************************************************************/
+function keydown(gl, event) {
+
+    var ad2, cd, cfac, code, mstep, sd, xstep, ystep, zstep;
+    var q = [];
+    var r = [];
+
+    cfac = Math.PI / 180.0;  // Degrees to radians conversion factor
+    mstep = 3.0 * cfac;      // Increment for light and model rotation angle
+    xstep = 0.15 * cfac;     // Increment for pitch
+    ystep = 0.15 * cfac;     // Increment for yaw (heading)
+    zstep = 5.0 * cfac;      // Increment for roll
+  
+    if (event.keyCode !== undefined) {
+        code = event.keyCode;
+    } else if (event.key !== undefined) {
+        code = event.key;
+    }
+
+    switch(code) {
+        case 37:                  // Left arrow:  y axis, increase
+            ad2 = mstep / 2.0;
+            if (event.shiftKey) { ad2 = 5.0 * ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle mstep or 5*mstep and axis [0, 1, 0].
+
+            r[0] = cd*q[0] - sd*q[2];
+            r[1] = cd*q[1] + sd*q[3];
+            r[2] = cd*q[2] + sd*q[0];
+            r[3] = cd*q[3] - sd*q[1];
+            orient_model.fromQuaternion(r);
+            break;
+
+        case 38:                  // Up arrow:  x axis, increase
+            ad2 = mstep / 2.0;
+            if (event.shiftKey) { ad2 = 5.0 * ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle mstep or 5*mstep and axis [1, 0, 0].
+
+            r[0] = cd*q[0] - sd*q[1];
+            r[1] = cd*q[1] + sd*q[0];
+            r[2] = cd*q[2] - sd*q[3];
+            r[3] = cd*q[3] + sd*q[2];
+            orient_model.fromQuaternion(r);
+            break;
+
+        case 39:                  // Right arrow:  y axis, decrease
+            ad2 = -mstep / 2.0;
+            if (event.shiftKey) { ad2 = 5.0 * ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle -mstep or -5*mstep and axis [0, 1, 0].
+
+            r[0] = cd*q[0] - sd*q[2];
+            r[1] = cd*q[1] + sd*q[3];
+            r[2] = cd*q[2] + sd*q[0];
+            r[3] = cd*q[3] - sd*q[1];
+            orient_model.fromQuaternion(r);
+            break;
+
+        case 40:                  // Down arrow:  x axis, decrease
+            ad2 = -mstep / 2.0;
+            if (event.shiftKey) { ad2 = 5.0 * ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_model.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle -mstep or -5*mstep and axis [1, 0, 0].
+
+            r[0] = cd*q[0] - sd*q[1];
+            r[1] = cd*q[1] + sd*q[0];
+            r[2] = cd*q[2] - sd*q[3];
+            r[3] = cd*q[3] + sd*q[2];
+            orient_model.fromQuaternion(r);
+            break;
+
+        case 69:                  // e:  Scale shininess exponent
+            if (event.shiftKey) {
+                imodel.shininess *= 2.0;
+            } else {
+                imodel.shininess *= 0.5;
+            }
+            break;
+
+        case 73:                  // i:  Rotate light source about x
+            ad2 = mstep / 2.0;
+            if (event.shiftKey) { ad2 = -ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_light.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle mstep or -mstep and axis [1, 0, 0].
+
+            r[0] = cd*q[0] - sd*q[1];
+            r[1] = cd*q[1] + sd*q[0];
+            r[2] = cd*q[2] - sd*q[3];
+            r[3] = cd*q[3] + sd*q[2];
+            orient_light.fromQuaternion(r);
+            break;
+
+        case 74:                  // j:  Rotate light source about y
+            ad2 = mstep / 2.0;
+            if (event.shiftKey) { ad2 = -ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_light.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle mstep or -mstep and axis [0, 1, 0].
+
+            r[0] = cd*q[0] - sd*q[2];
+            r[1] = cd*q[1] + sd*q[3];
+            r[2] = cd*q[2] + sd*q[0];
+            r[3] = cd*q[3] - sd*q[1];
+            orient_light.fromQuaternion(r);
+            break;
+
+        case 80:                  // p:  Toggle projection type
+            opt.perspective = !opt.perspective;
+            break;
+
+        case 82:                  // r:  Restore defaults
+            orient_camera.angle = 0.0;
+            orient_camera.axis = [1.0, 0.0, 0.0];
+            orient_light.angle = 0.0;
+            orient_light.axis = [1.0, 0.0, 0.0];
+            orient_model.angle = 0.0;
+            orient_model.axis = [1.0, 0.0, 0.0];
+            opt.perspective = true;
+            imodel.shininess = 32.0;
+            opt.vsf = 1.0;
+            break;
+
+        case 88:                  // x:  Change pitch
+            ad2 = xstep / 2.0;
+            if (event.shiftKey) { ad2 = -ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_camera.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle xstep or -xstep and axis [1, 0, 0].
+
+            r[0] = cd*q[0] - sd*q[1];
+            r[1] = cd*q[1] + sd*q[0];
+            r[2] = cd*q[2] - sd*q[3];
+            r[3] = cd*q[3] + sd*q[2];
+            orient_camera.fromQuaternion(r);
+            break;
+
+        case 89:                  // y:  Change yaw (heading)
+            ad2 = ystep / 2.0;
+            if (event.shiftKey) { ad2 = -ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_camera.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle ystep or -ystep and axis [0, 1, 0].
+
+            r[0] = cd*q[0] - sd*q[2];
+            r[1] = cd*q[1] + sd*q[3];
+            r[2] = cd*q[2] + sd*q[0];
+            r[3] = cd*q[3] - sd*q[1];
+            orient_camera.fromQuaternion(r);
+            break;
+
+        case 90:                  // z:  Change roll
+            ad2 = zstep / 2.0;
+            if (event.shiftKey) { ad2 = -ad2; }
+            cd = Math.cos(ad2);
+            sd = Math.sin(ad2);
+            q = orient_camera.toQuaternion();
+
+//  Compute r = p*q, where p is the unit quaternion equivalent of
+//  angle zstep or -zstep and axis [0, 0, 1].
+
+            r[0] = cd*q[0] - sd*q[3];
+            r[1] = cd*q[1] - sd*q[2];
+            r[2] = cd*q[2] + sd*q[1];
+            r[3] = cd*q[3] + sd*q[0];
+            orient_camera.fromQuaternion(r);
+            break;
+
+        case 188:                 // <:  Zoom out
+            opt.vsf *= 0.8;
+            break;
+
+        case 190:                 // >:  Zoom in
+            opt.vsf *= 1.2;
+            break;
+
+        default:
+            return;
+    }
+    draw(gl);
+}
+
+
+/******************************************************************************/
+function loadModel(gl, filename) {
+
+// Create an AJAX request to load a model asynchronously.
+
+    var request = new XMLHttpRequest();
+    var resource = "http://" + document.domain + filename;
+    request.open("GET", filename, true);
+    request.onreadystatechange = function() {
+        console.info(request.readyState + ' - ' + request.status); 
+        if (request.readyState == 4) {
+            if(request.status == 200) {   // OK
+              handleLoadedModel(gl, filename, JSON.parse(request.responseText));
+            } else if (document.domain.length === 0 && request.status === 0) { 
+//  OK but local, no web server
+              handleLoadedModel(gl, filename, JSON.parse(request.responseText));
+            } else{
+                alert ('There was a problem loading the file :' + filename);
+                alert ('HTML error code: ' + request.status);
+            }
+        }
+    };
+    request.send();
+}
+
+
+/******************************************************************************/
+function makePrograms(gl) {
+
+//  This function uses cuon-utils.js functions createProgram and loadShader 
+//  to creates four programs corresponding to the four shading methods.
+
+    var vShaderScript = {}, fShaderScript = {}; 
+    var strv = "", strf = "";
+    var program = 0;
+
+//  *** gl.prgF (Flat or faceted shading)
+
+//  Extract the text strings strv and strf from the shader script tags.
+
+    vShaderScript = document.getElementById("shader-vsF");
+    fShaderScript = document.getElementById("shader-fsF");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+        return false;
+    }
+    strv = vShaderScript.text;
+    strf = fShaderScript.text;
+    program = createProgram(gl, strv, strf);
+    if (!program) {
+        console.log('Failed to create program');
+        return false;
+    }
+    gl.prgF = program;
+
+//  *** gl.prgG (Gouraud shading)
+
+    vShaderScript = document.getElementById("shader-vsG");
+    fShaderScript = document.getElementById("shader-fsG");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+        return false;
+    }
+    strv = vShaderScript.text;
+    strf = fShaderScript.text;
+    program = createProgram(gl, strv, strf);
+    if (!program) {
+        console.log('Failed to create program');
+        return false;
+    }
+    gl.prgG = program;
+
+//  *** gl.prgP (Phong shading)
+
+    vShaderScript = document.getElementById("shader-vsP");
+    fShaderScript = document.getElementById("shader-fsP");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+        return false;
+    }
+    strv = vShaderScript.text;
+    strf = fShaderScript.text;
+    program = createProgram(gl, strv, strf);
+    if (!program) {
+        console.log('Failed to create program');
+        return false;
+    }
+    gl.prgP = program;
+
+//  *** gl.prgW (Wireframe mesh)
+
+    vShaderScript = document.getElementById("shader-vsW");
+    fShaderScript = document.getElementById("shader-fsW");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+        return false;
+    }
+    strv = vShaderScript.text;
+    strf = fShaderScript.text;
+    program = createProgram(gl, strv, strf);
+    if (!program) {
+        console.log('Failed to create program');
+        return false;
+    }
+    gl.prgW = program;
+
+    return true;
+}
+
+
+/******************************************************************************/
+function Orientation(angle, axis) {
+
+//  Prototype constructor for an orientation defined by an angle and axis.
+
+    this.angle = angle;                  // Angle in degrees
+    this.axis = axis;                    // Unit vector
+    this.toQuaternion = function() {
+
+//  Convert from angle/axis to unit quaternion.
+
+        var cfac = Math.PI / 180.0;
+        var ad2 = cfac * this.angle / 2.0;
+        var ca = Math.cos(ad2);
+        var sa = Math.sin(ad2);
+        return [ ca, sa * this.axis[0], sa * this.axis[1],
+                 sa * this.axis[2] ];
+    };
+
+    this.fromQuaternion = function(q) {
+
+//  Set properties to the angle/axis equivalent of unit quaternion q.
+
+        var cfac = Math.PI / 180.0;
+        this.angle = 2.0 * Math.acos(q[0]) / cfac;
+        var un = Math.sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (un > 0) {
+            this.axis[0] = q[1] / un;
+            this.axis[1] = q[2] / un;
+            this.axis[2] = q[3] / un;
+        }
+        return;
+    };
+}
+
+
+/******************************************************************************/
+function resize(gl) {
+
+// Get the canvas from the WebGL context.
+
+    var canvas = gl.canvas;
+ 
+// Lookup the size the browser is displaying the canvas.
+
+    var displayWidth  = canvas.clientWidth;
+    var displayHeight = canvas.clientHeight;
+ 
+// Check if the canvas is not the same size.
+
+    if (canvas.width  != displayWidth ||
+        canvas.height != displayHeight) {
+ 
+// Make the canvas the same size.
+
+        canvas.width  = displayWidth;
+        canvas.height = displayHeight;
+ 
+// Set the viewport to match.
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+}

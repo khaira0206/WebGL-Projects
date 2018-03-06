@@ -1,0 +1,327 @@
+
+//  pendulum2.js:  2D pendulum
+//  R. Renka
+//  07/25/2016
+//
+//  This program displays a hexagonal pendulum bob attached by a wire
+//  to an anchor point at the origin and rotating with an angular 
+//  velocity that may be increased or decreased by button presses.
+//
+//  The pendulum bob is rendered as a triangle fan.  The wire is a
+//  line segment, and the anchor point is a small square.
+//
+//  This code was adapted from RotatingTriangle_withButtons.js in
+//  matsuda/ch04.
+
+"use strict";
+
+//  Global variables:  
+//
+//  asize = anchor width and height
+//  currentAngle = angle defining current configuration
+//  da = angular velocity in degrees/second
+//  pause = true iff animation is inactive
+//  radius = radius of pendulum bob
+//  restart = true iff animation was paused and restarted since the 
+//            previous update
+//  tick = rendering function defined in main
+//  Lmin, Lmax = Minimum and maximum wire lengths
+
+var asize = 0.03;
+var currentAngle = 0.0;
+var da = 45.0;
+var Lmin = 0.10;
+var Lmax = 0.80;
+var pause = false;
+var radius = 0.10;
+var restart = false;
+var tick = {};
+
+/******************************************************************************/
+function main() {
+
+//  Retrieve <canvas> element
+
+    var canvas = document.getElementById("webgl");
+
+//  Get the rendering context for WebGL
+
+    var gl = getWebGLContext(canvas);
+    if (!gl) {
+        console.log("Failed to get the rendering context for WebGL");
+        return;
+    }
+
+//  Get the shader script tags.
+
+    var vShaderScript = document.getElementById("shader-vs");
+    var fShaderScript = document.getElementById("shader-fs");
+    if (!vShaderScript  ||  !fShaderScript) {
+        console.log("Failed to find shader script.");
+    }
+
+//  Initialize shaders and create a program object
+
+    if (!initShaders(gl, vShaderScript.text, fShaderScript.text)) {
+        console.log("Failed to intialize shaders.");
+        return;
+    }
+
+//  Write the positions of vertices to the vertex shader
+
+    if (!initVertexBuffers(gl)) {
+        console.log("Failed to set the positions of the vertices");
+        return;
+    }
+
+//  Get the storage locations of attribute and uniform variables
+
+    var a_Position = gl.getAttribLocation(gl.program, "a_Position");
+    var u_FragColor = gl.getUniformLocation(gl.program, "u_FragColor");
+    var u_ModelMatrix = gl.getUniformLocation(gl.program, "u_ModelMatrix");
+    if (a_Position < 0  ||  !u_FragColor  ||  !u_ModelMatrix) {
+        console.log("Failed to get the storage location of an attribute " +
+                    "or uniform variable");
+        return;
+    }
+
+//  Specify the color for clearing <canvas>
+
+    gl.clearColor(0, 0, 0, 1);
+
+//  Model matrix
+
+    var modelMatrix = new Matrix4();
+
+//  Define animation function
+
+    var ca = 0.0;
+    tick = function() {
+
+//  Update the rotation angle, and draw the pendulum.
+
+        if (pause) { 
+            ca = currentAngle;
+            return; 
+        }
+        if (!restart) { 
+            currentAngle = animate(currentAngle); 
+        } else {
+            currentAngle = ca;
+            g_last = Date.now();
+            restart = false;
+        }
+        draw(gl, currentAngle, a_Position, modelMatrix, u_ModelMatrix, 
+             u_FragColor);
+
+//  Request that the browser call tick
+
+        requestAnimationFrame(tick, canvas);   
+    };
+
+//  Start drawing
+
+    tick();
+} // end of main
+
+
+//  Global variables:  buffer objects
+
+var g_bobBuffer = null;
+var g_wireBuffer = null;
+var g_anchorBuffer = null;
+
+/******************************************************************************/
+function initVertexBuffers(gl) {
+
+//  Compute vertices defining a hexagonal pendulum bob
+
+    var r = radius;                      // radius of hexagonal bob
+    var xp = 0.5 * r;                    // r*cos(pi/6)
+    var yp = (Math.sqrt(3.0)/2.0) * r;   // r*sin(pi/6)
+    var vertices = new Float32Array ([
+        0.0, 0.0,   r, 0.0,   xp, yp,   -xp, yp,   -r, 0.0,
+        -xp, -yp,   xp, -yp,   r, 0.0
+    ]);
+
+//  Create buffer objects
+
+    g_bobBuffer = gl.createBuffer();
+    g_wireBuffer = gl.createBuffer();
+    g_anchorBuffer = gl.createBuffer();
+    if (!g_bobBuffer  ||  !g_wireBuffer  ||  !g_anchorBuffer) {
+        console.log("Failed to create a buffer object");
+        return -1;
+    }
+
+//  Set the number of vertices property nv, bind the buffer objects 
+//  to targets, and write the data for the bob and anchor.  The wire
+//  is altered by draw.
+
+    g_bobBuffer.nv = 8;
+    gl.bindBuffer(gl.ARRAY_BUFFER, g_bobBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    vertices = new Float32Array ([-asize/2.0, -asize/2.0,  
+                                   asize/2.0, -asize/2.0,  
+                                   asize/2.0,  asize/2.0,  
+                                  -asize/2.0,  asize/2.0 ]);
+    g_anchorBuffer.nv = 4;
+    gl.bindBuffer(gl.ARRAY_BUFFER, g_anchorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    return true;
+} // end of initVertexBuffers
+
+
+/******************************************************************************/
+function draw(gl, currentAngle, a_Position, modelMatrix, u_ModelMatrix, 
+              u_FragColor) {
+
+//  Clear <canvas>
+
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+//  Define the wire length as a function of currentAngle.
+
+    var wireLength = (Lmax - Lmin)/180.0;
+    if (currentAngle <= 180.0) {
+        wireLength = Lmin + wireLength*currentAngle;
+    } else {
+        wireLength = Lmax - wireLength*(currentAngle-180.0);
+    }
+
+//  Process the pendulum bob
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, g_bobBuffer);
+    gl.vertexAttribPointer(a_Position, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(a_Position);
+
+//  Set the model matrix for the pendulum bob
+
+    modelMatrix.setRotate(currentAngle, 0, 0, 1);
+    modelMatrix.translate(0.0, -wireLength, 0.0);
+ 
+//  Pass the model matrix to the vertex shader
+
+    gl.uniformMatrix4fv(u_ModelMatrix, false, modelMatrix.elements);
+
+//  Set the fragment color.
+
+    gl.uniform4f(u_FragColor, 0.0, 0.0, 1.0, 1.0);
+
+//  Draw the pendulum bob
+
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, g_bobBuffer.nv);
+
+//  Process the pendulum wire
+
+    var vertices = new Float32Array ([
+        0.0, 0.0,   0.0, Math.sqrt(3.0)*radius/2.0-wireLength ]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, g_wireBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    gl.vertexAttribPointer(a_Position, 2, gl.FLOAT, false, 0, 0);
+
+//  Set the model matrix for the pendulum wire
+
+    modelMatrix.setRotate(currentAngle, 0, 0, 1);
+ 
+//  Pass the model matrix to the vertex shader
+
+    gl.uniformMatrix4fv(u_ModelMatrix, false, modelMatrix.elements);
+
+//  Set the fragment color.
+
+    gl.uniform4f(u_FragColor, 1.0, 0.0, 0.0, 1.0);
+
+//  Draw the pendulum wire
+
+    gl.drawArrays(gl.LINES, 0, 2);
+
+//  Process the pendulum anchor
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, g_anchorBuffer);
+    gl.vertexAttribPointer(a_Position, 2, gl.FLOAT, false, 0, 0);
+
+//  Set the model matrix for the pendulum anchor
+
+    modelMatrix.setIdentity();
+ 
+//  Pass the model matrix to the vertex shader
+
+    gl.uniformMatrix4fv(u_ModelMatrix, false, modelMatrix.elements);
+
+//  Set the fragment color.
+
+    gl.uniform4f(u_FragColor, 0.0, 1.0, 0.0, 1.0);
+
+//  Draw the pendulum anchor
+
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, g_anchorBuffer.nv);
+} // end of draw
+
+
+//  Global variable:  g_last = last time that animate was called
+
+var g_last = Date.now();
+
+/******************************************************************************/
+function animate(angle) {
+
+//  Calculate the elapsed time (in milliseconds)
+
+    var now = Date.now();
+    var elapsed = now - g_last;
+    g_last = now;
+
+//  Update the current rotation angle
+
+    var newAngle = angle + (da * elapsed) / 1000.0;
+    newAngle %= 360;
+    if (newAngle < 0) { newAngle += 360; }
+    return newAngle;
+} // end of animate
+
+
+//  Button functions 
+
+/******************************************************************************/
+function down() {
+    if (da > 0) {
+        da = Math.max(da-15.0, 5.0);
+    } else {
+        da = Math.min(da+15.0, -5.0);
+    }
+}
+
+
+/******************************************************************************/
+function up() {
+    if (da > 0) {
+        da += 15.0;
+    } else {
+        da -= 15.0;
+    }
+}
+
+
+/******************************************************************************/
+function stop() {
+    pause = true;
+}
+
+
+/******************************************************************************/
+function resume() {
+    if (!pause) { return; }
+    pause = false;
+    restart = true;
+    tick();
+}
+
+
+/******************************************************************************/
+function reverse() {
+    da = -da;
+}
